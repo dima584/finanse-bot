@@ -247,21 +247,26 @@ def save_signal(signal_data: dict) -> int:
     """Сохранить сигнал в БД, вернуть его ID"""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Беремо limit_entry, якщо його немає - звичайний entry_price
+    actual_entry = signal_data.get("limit_entry", signal_data["entry_price"])
+    
+    # Додали поле status зі значенням 'pending'
     cursor.execute("""
         INSERT INTO signals 
         (symbol, timeframe, direction, entry_price, stop_loss, take_profit, 
-         risk_score, confidence, indicators)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         risk_score, confidence, indicators, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
     """, (
         signal_data["symbol"],
         signal_data["timeframe"],
         signal_data["direction"],
-        signal_data["entry_price"],
+        actual_entry,  # Використовуємо лімітну ціну
         signal_data["stop_loss"],
         json.dumps(signal_data["take_profit"]),
         signal_data["risk_score"],
         signal_data["confidence"],
-        json.dumps(signal_data.get("indicators", {}))
+        json.dumps(signal_data.get("indicators", {})),
     ))
     signal_id = cursor.lastrowid
     conn.commit()

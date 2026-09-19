@@ -279,38 +279,8 @@ async def check_dxy_trend() -> int:
       DXY падает → крипта растёт → блокируем SHORT
     Возвращает: 1 (доллар силён), -1 (доллар слаб), 0 (флэт/нет данных)
     """
-    if not HAS_YFINANCE:
-        return 0
-
-    def _fetch():
-        try:
-            # Заменили старый тикер на рабочий фьючерс
-            ticker = yf.Ticker("DX=F")
-            hist = ticker.history(period="5d", interval="1d")
-            if hist.empty or len(hist) < 2:
-                return 0
-            
-            today = hist["Close"].iloc[-1]
-            yest  = hist["Close"].iloc[-2]
-            change = (today - yest) / yest
-            
-            if change > 0.002:    # +0.2% = сильный рост доллара
-                return 1
-            elif change < -0.002: # -0.2% = сильное падение доллара
-                return -1
-            return 0
-        except Exception as e:
-            logger.debug(f"Ошибка получения DXY: {e}")
-            return 0
-
-    try:
-        # Жесткий таймаут 3 секунды. Не позволим Yahoo Finance вешать бота!
-        return await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=3.0)
-    except asyncio.TimeoutError:
-        logger.warning("Таймаут DXY (Yahoo Finance тупит). Возвращаем нейтральный тренд.")
-        return 0
-    except Exception:
-        return 0
+    """DXY отключён — yfinance нестабилен."""
+    return 0
 
 async def fetch_funding_rate(symbol: str) -> float:
     """
@@ -473,13 +443,30 @@ def calculate_bollinger_bands(close: pd.Series) -> tuple:
 def calculate_ema(close: pd.Series, period: int) -> pd.Series:
     return close.ewm(span=period, adjust=False).mean()
 
-def calculate_atr(high, low, close, period: int = ATR_PERIOD) -> pd.Series:
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """ATR по методу Wilder с защитой от NaN."""
+    high = pd.to_numeric(high, errors="coerce")
+    low = pd.to_numeric(low, errors="coerce")
+    close = pd.to_numeric(close, errors="coerce")
+
+    prev_close = close.shift(1)
+
     tr = pd.concat([
         high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs()
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
     ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+
+    tr = tr.replace([np.inf, -np.inf], np.nan)
+    tr = tr.fillna(high - low) # Первый TR = диапазон первой свечи
+
+    atr = tr.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period
+    ).mean()
+
+    return atr
 
 def calculate_stochastic(high, low, close, k=14, d=3) -> tuple:
     lo = low.rolling(k).min()
@@ -519,17 +506,31 @@ def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int
     return adx.fillna(0)
 
 def calculate_volume_signal(volume: pd.Series, period: int = 20) -> dict:
-    """Оценка всплеска объемов. Добавлен min_periods=1."""
-    # min_periods=1 спасает от NaN, если истории меньше, чем period
-    avg = volume.rolling(period, min_periods=1).mean()
+    """Нормализованный Volume Ratio относительно предыдущих свечей."""
+    volume = pd.to_numeric(volume, errors="coerce").fillna(0.0)
+
     cur = float(volume.iloc[-1])
-    avg_v = float(avg.iloc[-1])
-    
-    if np.isnan(avg_v) or avg_v == 0:
-        avg_v = 1.0
-        
+
+    # Сравниваем текущую свечу только с ПРЕДЫДУЩИМИ
+    avg_prev = volume.shift(1).rolling(period, min_periods=5).mean()
+    avg_v = float(avg_prev.iloc[-1])
+
+    if not np.isfinite(avg_v) or avg_v <= 0:
+        return {
+            "ratio": 1.0,
+            "current": cur,
+            "average": 0.0,
+            "is_high": False
+        }
+
     ratio = cur / avg_v
-    return {"ratio": round(ratio, 2), "is_high": ratio > 1.3}
+
+    return {
+        "ratio": round(float(ratio), 4),
+        "current": round(cur, 8),
+        "average": round(avg_v, 8),
+        "is_high": False
+    }
 
 
 # ════════════════════════════════════════════
@@ -573,6 +574,9 @@ def _score_dataframe(df: pd.DataFrame, symbol: str, timeframe: str, btc_trend: i
     psk_v = float(sk.iloc[-2])
     ml    = float(macd_line.iloc[-1])
     sl_v  = float(sig.iloc[-1])
+    macd_hist_pct = (h / p) * 100 if p > 0 else 0.0
+    macd_hist_prev_pct = (ph / p) * 100 if p > 0 else 0.0
+    macd_hist_change_pct = macd_hist_pct - macd_hist_prev_pct
     adx_v = 0.0 if np.isnan(float(adx_line.iloc[-1])) else float(adx_line.iloc[-1])
     padx_v = float(adx_line.iloc[-2])
 
@@ -743,7 +747,7 @@ def _score_dataframe(df: pd.DataFrame, symbol: str, timeframe: str, btc_trend: i
     dist_ema9_pct = (p - e9) / e9 * 100
     
     # Максимально допустимый отрыв (2.0%). Если цена улетела дальше, входить поздно.
-    MAX_EMA9_DIST = 2.0
+    MAX_EMA9_DIST = 4.0
     
     # Если бот хочет в лонг, но цена УЖЕ высоко над EMA9 -> блокируем
     if score > 0 and dist_ema9_pct > MAX_EMA9_DIST:
@@ -768,7 +772,7 @@ def _score_dataframe(df: pd.DataFrame, symbol: str, timeframe: str, btc_trend: i
 
     # === НОВЫЕ ПАРАМЕТРЫ ДЛЯ ML ДАТАСЕТА (Мягкое добавление) ===
     # 1. Волатильность (ширина ATR в процентах)
-    volatility_pct = round((atr_v / p) * 100, 2)
+    volatility_pct = float(atr_pct)
     
     # 2. Кумулятивная дельта объема (CVD) за последние 10 свечей
     buy_vol = df["taker_buy_base"]
@@ -777,7 +781,7 @@ def _score_dataframe(df: pd.DataFrame, symbol: str, timeframe: str, btc_trend: i
     cvd_15m = float(delta.tail(10).sum())
     
     # 3. Расчет лимитной цены входа (вместо рыночной цены p)
-    limit_buffer = atr_v * 0.4
+    limit_buffer = atr_v * 0.15
     if score > 0:
         limit_entry = round(p - limit_buffer, 6)
     elif score < 0:
@@ -789,10 +793,10 @@ def _score_dataframe(df: pd.DataFrame, symbol: str, timeframe: str, btc_trend: i
     # 🔥 ВСТАВЬ ЭТОТ БЛОК СЮДА 🔥
     # === БОЕВОЙ РЕЖИМ: ЖЕСТКИЕ БЛОКИРОВКИ ===
     if score > 0 and btc_trend == -1:
-        score -= 2
+        score -= 1
         reasons.append("⚠️ BTC против LONG (-2)")
     elif score < 0 and btc_trend == 1:
-        score += 2
+        score += 1
         reasons.append("⚠️ BTC против SHORT (+2)")
         
     if score > 0 and cvd_15m < 0:
@@ -915,8 +919,7 @@ async def analyze_symbol(symbol: str, timeframe: str = "1h") -> Optional[dict]:
         if df_senior is not None:
             senior = _score_dataframe(df_senior, symbol, senior_tf)
             if senior and senior["direction"] not in ("NEUTRAL", direction):
-                score -= 2
-                reasons.append(f"⚠️ MTFA: {senior_tf} против ({senior['direction']}), штраф -2")
+                return None  # Жесткий блок: против старшего тренда не торгуем
             elif senior and senior["direction"] == direction:
                 score += 2
                 reasons.append(f"✅ MTFA: {senior_tf} подтверждает {direction} (+2)")
@@ -935,13 +938,13 @@ async def analyze_symbol(symbol: str, timeframe: str = "1h") -> Optional[dict]:
             current_ema200_macro = float(ema200_macro.iloc[-1])
             
             if direction == "LONG" and current_price_macro < current_ema200_macro:
-                score -= 2
-                reasons.append("⚠️ Макро-тренд против LONG (-2)")
+                score -= 1
+                reasons.append("⚠️ Макро против LONG (-3)")
             elif direction == "SHORT" and current_price_macro > current_ema200_macro:
-                score -= 2
-                reasons.append("⚠️ Макро-тренд против SHORT (-2)")
+                score -= 1
+                reasons.append("⚠️ Макро против SHORT (-3)")
             else:
-                reasons.append(f"🛡 Макро-тренд ({macro_tf}) на нашей стороне")
+                reasons.append(f"✅ Макро-тренд ({macro_tf}) подтверждает")
             
     # ───────────────────────────────────────────────────
 
@@ -1009,7 +1012,7 @@ async def analyze_symbol(symbol: str, timeframe: str = "1h") -> Optional[dict]:
 
     # Базовые значения
     base_sl  = {"15m": 2.0, "1h": 2.5, "4h": 3.0, "1d": 3.5}.get(timeframe, 2.0)
-    base_tp1 = {"15m": 2.0, "1h": 2.5, "4h": 3.0, "1d": 3.5}.get(timeframe, 2.0)
+    base_tp1 = {"1h": 0.5, "4h": 0.8, "1d": 1.5}.get(timeframe, 0.5)
     base_tp2 = {"15m": 3.5, "1h": 4.5, "4h": 5.5, "1d": 6.5}.get(timeframe, 3.5)
     base_tp3 = {"15m": 5.0, "1h": 6.5, "4h": 8.0, "1d": 10.0}.get(timeframe, 5.0)
 
@@ -1028,15 +1031,16 @@ async def analyze_symbol(symbol: str, timeframe: str = "1h") -> Optional[dict]:
         dist_to_wall = walls["resistance"] - p
         dist_to_tp1 = atr_v * tp1_mult
         if 0 < dist_to_wall < dist_to_tp1:
-            score -= 2
-            reasons.append(f"⚠️ Стена продавцов перед TP1 (-2)")
+            score -= 1
+            reasons.append(f"⚠️ Стена продавцов перед TP1 (-1)")
 
     elif direction == "SHORT" and walls.get("support"):
         dist_to_wall = p - walls["support"]
         dist_to_tp1 = atr_v * tp1_mult
         if 0 < dist_to_wall < dist_to_tp1:
-            score += 2
-            reasons.append(f"⚠️ Стена покупателей перед TP1 (+2)")
+            score += 1
+            reasons.append(f"⚠️ Стена покупателей перед TP1 (+1)")
+
     # ──────────────────────────────────────────────────────────
             # return None  <--- УДАЛИ ИЛИ ЗАКОММЕНТИРУЙ ЭТУ СТРОКУ
     # ──────────────────────────────────────────────────────────
@@ -1046,49 +1050,44 @@ async def analyze_symbol(symbol: str, timeframe: str = "1h") -> Optional[dict]:
 
     # ── 1. СНАЧАЛА СЧИТАЕМ ЛИМИТКУ ──
     # Расчет идеальной лимитной точки входа (откат 0.4 ATR от текущей цены)
-    limit_buffer = atr_v * 0.4
+    limit_buffer = atr_v * 0.15
     limit_entry = round(p - limit_buffer, 6) if direction == "LONG" else round(p + limit_buffer, 6)
 
     # ── 2. СЧИТАЕМ УРОВНИ СТРОГО ОТ ЛИМИТКИ (limit_entry) ──
+    # ── 2. СЧИТАЕМ УРОВНИ ОТ ТЕКУЩЕЙ ЦЕНЫ (p) ──
     if direction == "LONG":
-        # Стоп прячем за стену поддержки
-        if walls.get("support") and walls["support"] < limit_entry:
+        if walls.get("support") and walls["support"] < p:
             stop_loss = round(walls["support"] - atr_v * WALL_BUFFER, 6)
-            reasons.append("🛡 Стоп надежно спрятан за стену поддержки")
         else:
-            stop_loss = round(limit_entry - atr_v * sl_mult, 6)
+            stop_loss = round(p - atr_v * sl_mult, 6)
 
-        # TP2 ставим перед стеной сопротивления
-        tp2_base = round(limit_entry + atr_v * tp2_mult, 6)
-        if walls.get("resistance") and limit_entry < walls["resistance"] < tp2_base:
+        tp2_base = round(p + atr_v * tp2_mult, 6)
+        if walls.get("resistance") and p < walls["resistance"] < tp2_base:
             tp2 = round(walls["resistance"] - atr_v * 0.1, 6)
-            reasons.append("🎯 TP2 перед стеной сопротивления")
         else:
             tp2 = tp2_base
 
         take_profit = [
-            round(limit_entry + atr_v * tp1_mult, 6),
+            round(p + atr_v * tp1_mult, 6),
             tp2,
-            round(limit_entry + atr_v * tp3_mult, 6),
+            round(p + atr_v * tp3_mult, 6),
         ]
     else:  # SHORT
-        if walls.get("resistance") and walls["resistance"] > limit_entry:
+        if walls.get("resistance") and walls["resistance"] > p:
             stop_loss = round(walls["resistance"] + atr_v * WALL_BUFFER, 6)
-            reasons.append("🛡 Стоп надежно спрятан за стену сопротивления")
         else:
-            stop_loss = round(limit_entry + atr_v * sl_mult, 6)
+            stop_loss = round(p + atr_v * sl_mult, 6)
 
-        tp2_base = round(limit_entry - atr_v * tp2_mult, 6)
-        if walls.get("support") and tp2_base < walls["support"] < limit_entry:
+        tp2_base = round(p - atr_v * tp2_mult, 6)
+        if walls.get("support") and tp2_base < walls["support"] < p:
             tp2 = round(walls["support"] + atr_v * 0.1, 6)
-            reasons.append("🎯 TP2 перед стеной поддержки")
         else:
             tp2 = tp2_base
 
         take_profit = [
-            round(limit_entry - atr_v * tp1_mult, 6),
+            round(p - atr_v * tp1_mult, 6),
             tp2,
-            round(limit_entry - atr_v * tp3_mult, 6),
+            round(p - atr_v * tp3_mult, 6),
         ]
 
     # ── 3. ФИНАЛЬНАЯ ВАЛИДАЦИЯ RISK/REWARD ──

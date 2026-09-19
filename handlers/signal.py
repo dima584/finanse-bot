@@ -3,11 +3,14 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import get_or_create_user, can_receive_signal, increment_signal_count, save_signal
-from analysis.technical import analyze_symbol
+from analysis.technical import analyze_symbol, fetch_ohlcv
 from utils.formatter import format_signal_message
 from config import CRYPTO_PAIRS
 from database import get_active_signals
 from database import get_user
+from telegram import InputFile
+from utils.charts import create_signal_chart
+
 
 
 
@@ -212,11 +215,36 @@ async def run_analysis(update_or_query, context, timeframe: str, user: dict):
             callback_data="show_plans"
         )])
 
-    await context.bot.send_message(
-        chat_id=tid, text=text, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(kb),
-        protect_content=True,
-    )
+    # Подтягиваем свечи для отрисовки графического превью
+    df_candles = await fetch_ohlcv(best['symbol'], best['timeframe'], limit=100)
+    
+    if df_candles is not None and not df_candles.empty:
+        # Генерируем картинку в память
+        photo_buffer = create_signal_chart(
+            df_prices=df_candles,
+            symbol=best['symbol'],
+            entry=best['entry_price'],
+            sl=best['stop_loss'],
+            tp_list=best['take_profit']
+        )
+        photo_file = InputFile(photo_buffer, filename=f"{best['symbol'].replace('/', '_')}.png")
+    
+        # Отправляем фото, где текст сигнала уходит как подпись (caption)
+        await context.bot.send_photo(
+            chat_id=tid,
+            photo=photo_file,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb),
+            
+        )
+    else:
+        # Если история вдруг не прогрузилась — отправляем по старинке текстом
+        await context.bot.send_message(
+            chat_id=tid, text=text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb),
+            protect_content=True,
+        )
 
 
 async def handle_timeframe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

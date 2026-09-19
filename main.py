@@ -4,6 +4,7 @@ import asyncio
 from database import get_daily_stats
 from database import get_active_signals
 from executor import execute_binance_trade
+from database import get_signal_by_id, update_signal_status
 import logging
 from analysis.technical import analyze_symbol
 from database import get_daily_stats, get_active_signals, update_user_deposit, update_user_risk, get_user
@@ -193,21 +194,40 @@ async def monitor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         status_emoji = "🟢" if pct > 0 else "🔴"
         
-        msg = (
-            f"🔍 <b>Лайв-моніторинг {sym} ({direction})</b>\n\n"
-            f"🎯 Точка входу: <b>{entry}</b>\n"
-            f"🔖 Поточна ціна: <b>{curr_price}</b>\n"
-            f"📈 Поточний PnL: {status_emoji} <b>{pct:+.2f}%</b>\n\n"
-            f"<i>Статус у базі: {sig['status']}</i>"
-        )
-        
-        # Кнопка для ручного оновлення саме цього повідомлення
+        # 1. Перевіряємо, чи не зачепило лімітку прямо зараз
+        if sig['status'] == 'pending':
+            if (direction == 'LONG' and curr_price <= entry) or (direction == 'SHORT' and curr_price >= entry):
+                # Лімітка спрацювала! Оновлюємо статус у базі
+                sig['status'] = 'active'
+                update_signal_status(signal_id, 'active')
+
+        # 2. Формуємо повідомлення залежно від статусу
+        if sig['status'] == 'pending':
+            # Рахуємо, скільки відсотків ціні залишилося пройти до лімітки
+            dist_pct = abs(curr_price - entry) / curr_price * 100
+            msg = (
+                f"⏳ <b>Очікування лімітки {sym} ({direction})</b>\n\n"
+                f"🎯 Лімітний ордер: <b>{entry}</b>\n"
+                f"🔖 Поточна ціна: <b>{curr_price}</b>\n"
+                f"📏 До входу залишилось: <b>{dist_pct:.2f}%</b>\n\n"
+                f"<i>Статус у базі: {sig['status']}</i>"
+            )
+        elif sig['status'] == 'active':
+            msg = (
+                f"🔍 <b>Лайв-моніторинг {sym} ({direction})</b>\n\n"
+                f"🎯 Точка входу: <b>{entry}</b>\n"
+                f"🔖 Поточна ціна: <b>{curr_price}</b>\n"
+                f"📈 Поточний PnL: {status_emoji} <b>{pct:+.2f}%</b>\n\n"
+                f"<i>Статус у базі: {sig['status']}</i>"
+            )
+            
+        # Кнопка для ручного оновлення
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔄 Оновити дані", callback_data=f"mon_{signal_id}")
         ]])
-        
-        # Надсилаємо нове повідомлення з деталями
-        await query.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
+    
+        # Редагуємо поточне повідомлення, щоб не спамити новими в чат
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
 
 # ... (здесь заканчивается код monitor_callback) ...
 
@@ -226,7 +246,7 @@ async def trade_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("⏳ Отправляю ордера на Binance...")
         
         # Вызываем логику торговли из executor.py
-        result = await execute_binance_trade(signal_id)
+        result = await execute_binance_trade(signal_id, update.effective_user.id)
         
         if result['success']:
             await query.message.reply_text(f"✅ Сделка открыта!\nОбъем: {result['qty']} монет.")
