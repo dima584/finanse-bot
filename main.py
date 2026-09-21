@@ -137,8 +137,9 @@ async def daily_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             st = sig['status']
             sid = sig['id'] # Получаем ID сделки из базы
             
-            if st == 'active':
-                msg += f"⏳ {sym} (Ожидает целей)\n"
+            if st in ('active', 'pending'):
+                current_state = "Ожидает входа" if st == 'pending' else "Ожидает целей"
+                msg += f"⏳ {sym} ({current_state})\n"
             elif st == 'active_tp1':
                 msg += f"🎯 {sym} (Взят TP1, стоп в Б.У.)\n"
             elif st == 'active_tp2':

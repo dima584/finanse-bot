@@ -182,6 +182,15 @@ async def check_active_trades(app):
         # Служебный PnL для статистики: 1R = $10 по исторической схеме.
         risk_usd = 10.0
         
+        # --- ИСПРАВЛЕНИЕ: Активация лимитного ордера ---
+        if status == 'pending':
+            if (direction == 'LONG' and curr_price <= entry) or (direction == 'SHORT' and curr_price >= entry):
+                update_signal_status(sid, 'active')
+                status = 'active'  # Ордер сработал, продолжаем логику
+            else:
+                continue  # Цена еще не дошла до лимитки, ждем дальше
+        # -----------------------------------------------
+
         # 3. ATR TRAILING STOP (динамічне оновлення стопу)
         # Працює тільки для активних угод, які вже в плюсі > 1%
         if status in ("active", "active_tp1", "active_tp2") and pct > 1.0:

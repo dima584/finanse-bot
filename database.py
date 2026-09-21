@@ -291,7 +291,8 @@ def get_active_signals():
     """Получить все незакрытые сигналы"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM signals WHERE status LIKE 'active%'")
+    # ИСПРАВЛЕНИЕ: теперь берем и active, и pending
+    cursor.execute("SELECT * FROM signals WHERE status LIKE 'active%' OR status = 'pending'")
     signals = []
     for row in cursor.fetchall():
         d = dict(row)
