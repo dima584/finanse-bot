@@ -227,8 +227,14 @@ async def monitor_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Оновити дані", callback_data=f"mon_{signal_id}")
         ]])
     
-        # Редагуємо поточне повідомлення, щоб не спамити новими в чат
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
+        # Редагуємо поточне повідомлення, перехоплюючи помилку Telegram
+        try:
+            await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                pass  # Игнорируем ошибку: цена и статус остались прежними
+            else:
+                print(f"Помилка при оновленні кнопки: {e}")
 
 # ... (здесь заканчивается код monitor_callback) ...
 
