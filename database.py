@@ -17,7 +17,9 @@ DB_PATH = DATABASE_URL.replace("sqlite:///", "")
 
 def get_connection():
     """Получить соединение с базой данных"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=15000;")
     conn.row_factory = sqlite3.Row   # Результаты как словари
     return conn
 
@@ -424,3 +426,18 @@ def save_ml_snapshot(symbol, timeframe, entry_price, r, ml, adx_v, dist_ema9_pct
         print(f"DB Error: {e}")
     finally:
         conn.close()
+
+def cancel_expired_pending_signals(max_hours: int = 4):
+    """Отменяет лимитки, которые висят в pending дольше указанного времени"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE signals 
+        SET status = 'cancelled_expired', closed_at = CURRENT_TIMESTAMP
+        WHERE status = 'pending' 
+          AND created_at <= datetime('now', '-' || ? || ' hours')
+    """, (max_hours,))
+    cancelled_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return cancelled_count

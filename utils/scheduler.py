@@ -178,8 +178,8 @@ async def auto_scan_and_send(app: Application, timeframe: str):
 
 def setup_scheduler(app: Application) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(check_active_trades, "cron", minute="*/3", args=[app],
-                       id="trade_tracker", max_instances=1, coalesce=True, misfire_grace_time=60)
+    scheduler.add_job(check_active_trades, "interval", seconds=20, args=[app],
+                       id="trade_tracker", max_instances=1, coalesce=True, misfire_grace_time=15)
     
     scheduler.add_job(auto_scan_and_send, "cron", minute="5", args=[app, "1h"],
                        id="scan_1h", max_instances=1, coalesce=True, misfire_grace_time=180)

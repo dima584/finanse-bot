@@ -50,25 +50,27 @@ async def get_top_volume_pairs(limit: int = 30) -> list:
 logger = logging.getLogger(__name__)
 
 async def fetch_current_prices(symbols: list[str]) -> dict[str, float]:
-    """Быстрый запрос текущих цен через Binance Ticker API"""
+    """Быстрый запрос реальных цен с Binance FUTURES"""
     if not symbols:
         return {}
     
-    clean_symbols = [s.replace("/", "") for s in symbols]
-    url = 'https://api.binance.com/api/v3/ticker/price'
-    
-    # Формируем JSON массив для запроса нескольких пар разом
-    symbols_param = '["' + '","'.join(clean_symbols) + '"]'
+    # Фьючерсный эндпоинт Binance
+    url = 'https://fapi.binance.com/fapi/v1/ticker/price'
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{url}?symbols={symbols_param}") as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # Возвращаем словарь {'BTCUSDT': 65000.0, ...}
-                    return {item['symbol']: float(item['price']) for item in data}
+                    clean_lookup = {s.replace("/", ""): s for s in symbols}
+                    prices = {}
+                    for item in data:
+                        sym = item['symbol']
+                        if sym in clean_lookup:
+                            prices[sym] = float(item['price'])
+                    return prices
     except Exception as e:
-        logger.error(f"Ошибка при запросе цен в трекере: {e}")
+        logger.error(f"Ошибка при запросе фьючерсных цен: {e}")
     return {}
 
 from database import get_users_for_signal # Змінюємо імпорт
@@ -153,15 +155,13 @@ async def update_atr_cache(signals: list):
 
 async def check_active_trades(app):
     """Оптимізований трекінг з ATR Trailing Stop"""
+    # 1. Автоматически отменяем лимитки старше 3 часов, чтобы они не засоряли бота
+    from database import cancel_expired_pending_signals
+    cancel_expired_pending_signals(max_hours=4)
+
     active_signals = get_active_signals()
     if not active_signals:
         return
-
-    symbols = list(set(s['symbol'] for s in active_signals))
-    
-    # 1. Оновлюємо кеш ATR перед циклом (один запит на символ)
-    # Обновляем ATR для всех активных сигналов
-    await update_atr_cache(active_signals)
 
 # Получаем текущие цены
     symbols = list(set(s["symbol"] for s in active_signals))
